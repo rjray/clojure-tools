@@ -1,0 +1,14 @@
+#!/bin/sh
+
+# Simple wrapper to launch swank-clojure from out of the git repo
+
+if [ ! -f ~/.clojurerc ]; then
+    echo "Warning: No config file ($HOME/.clojurerc) found"
+    echo "  Unless you are specifying the clojure/clojure-contrib JARs on the"
+    echo "  command line, and/or are specifying a config file on the command"
+    echo "  line, this command will likely fail."
+fi
+
+exec clojure --classpath ~/work/clojure/swank-clojure/src \
+    --classpath ~/work/clojure --script /dev/null --nowrapper \
+    --eval "(use 'swank.swank)(apply -main *command-line-args*)" $*

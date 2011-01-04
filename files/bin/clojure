@@ -1,0 +1,768 @@
+#!/usr/bin/perl
+
+###############################################################################
+#
+# This file copyright (c) Randy J. Ray, all rights reserved
+#
+# Copying and distribution are permitted under the terms of the Artistic
+# License 2.0 (http://www.opensource.org/licenses/artistic-license-2.0.php),
+# the GNU LGPL 2.1 (http://www.opensource.org/licenses/lgpl-2.1.php) or the
+# EPL 1.0 (http://www.opensource.org/licenses/eclipse-1.0.php).
+#
+###############################################################################
+#
+#   Description:    A launcher for clojure chock full 'o options.
+#
+#   Functions:      merge_config
+#                   jars_in_dir
+#                   filtered_jars
+#                   build_command
+#
+#   Libraries:      Carp
+#                   File::Basename
+#                   Getopt::Long
+#
+#   Global Consts:  $VERSION
+#                   $revision
+#                   $cmd
+#
+#   Environment:    Might alter LD_LIBRARY_PATH
+#
+###############################################################################
+
+use 5.010;
+use strict;
+use warnings;
+use vars qw($CMD $USAGE $VERSION);
+use subs qw(merge_config jars_in_dir filtered_jars build_command);
+
+use Carp 'croak';
+use File::Basename qw(basename);
+use Getopt::Long;
+
+$VERSION = '0.100';
+$CMD = basename $0;
+$USAGE = << "EOUSAGE";
+$CMD [ --clojure JAR ] [ --clojure-contrib JAR ] [ --main class ]
+    [ --classpath value ] [ --dir directory ] [ --library libdir ]
+    [ --exclude JAR ] [ --eval string ] [ --init file ] [ --script file ]
+    [ { --wrapper wrapper-class | --nowrapper } ] [ --java javapath ]
+    [ --javaopt JVM-option ] [ --config config-file ] [ --help ] [ --man ]
+    [ args ]
+
+where:
+
+--clojure JAR               Specify the path to the Clojure core JAR file.
+--clojure-contrib JAR       Specify the path to the Clojure contrib JAR.
+--classpath value           One or more classpath entries, separated by ':'
+                              characters, may be directories or JARs. May
+                              be used more than once.
+--dir directory             One or more directories, separated by ':'
+                              characters. All JAR files in the directories
+                              will be added to the class path. May be used
+                              more than once.
+--library lib-directory     One or more directories, separated by ':'
+                              characters, which are added to the
+                              LD_LIBRARY_PATH for library location. May be
+                              used more than once.
+--exclude JAR               Exclude the specified JAR file from the class
+                              path. Useful for pruning out contents included
+                              via --dir. May be used more than once.
+--main class                Specify an alternate class to invoke the "main"
+                              method from. The default is "clojure.main".
+--eval string               Pass a string to the main Clojure class for
+                              evaluation before any script or REPL is run.
+--init file                 Name of an init-file to pass to the main Clojure
+                              class. Any code in it gets eval'd before a
+                              script or REPL is run.
+--script file               Name of a file to have Clojure run, rather than
+                              starting a REPL.
+--wrapper wrapper-class     A wrapper-class to run around clojure.main. Most
+                              often used with the jLine library.
+--nowrapper                 Disable any wrapper-class, even if specified in a
+                              configuration file.
+--java javapath             Provide the path to a Java JVM to use. Defaults to
+                              and relies on it being found in your path.
+--javaopt JVM-option        Specify an option to be passed to the JVM (as
+                              opposed to Clojure itself). May be used more than
+                              once.
+
+--config config-file        Specify an alternate cofiguration file to read
+                              (the default is $ENV{HOME}/.clojurerc)
+
+--help                      Print this summary and exit.
+--man                       Display the full manual page and exit.
+
+[ args ]                    All additional arguments passed to Clojure for
+                              command-line processing.
+EOUSAGE
+
+my %opts;
+GetOptions(
+    \%opts,
+    qw(
+        classpath|cp=s@
+        clojure|CL=s
+        clojure-contrib|CC=s
+        config|c=s
+        debug
+        dir|d=s@
+        eval|e=s
+        exclude|x=s@
+        help|h
+        init|i=s
+        java=s
+        javaopt=s@
+        library|L=s@
+        main=s
+        man
+        nowrapper
+        script|s=s
+        wrapper=s
+    )
+) or croak $USAGE;
+
+if ($opts{help})
+{
+    print "USAGE:\n\n$USAGE";
+    exit 0;
+}
+elsif ($opts{man})
+{
+    exec 'perldoc', $0;
+}
+
+merge_config;
+# Special-case this, since there is no viable way of passing "" to --wrapper
+# without a config-file setting overriding it:
+if ($opts{nowrapper})
+{
+    delete $opts{wrapper};
+}
+
+# If there was no init file given in either the command-line args or the config
+# file, then look for ~/.clojure.clj
+if ((! $opts{init}) && (-f "$ENV{HOME}/.clojure.clj"))
+{
+    $opts{init} = "$ENV{HOME}/.clojure.clj";
+}
+
+# Read/store any JARs in specified directories
+for my $jardir (@{$opts{dir}})
+{
+    push @{$opts{classpath}}, jars_in_dir($jardir);
+}
+if ($opts{'clojure-contrib'})
+{
+    unshift @{$opts{classpath}}, $opts{'clojure-contrib'};
+}
+if ($opts{clojure})
+{
+    unshift @{$opts{classpath}}, $opts{clojure};
+}
+# Make a single, :-separated string
+$opts{classpath} = join q{:} => @{$opts{classpath} || []};
+# If we have no JARs/classpaths, we have no way to execute
+if (! $opts{classpath})
+{
+    croak 'No classpaths specified to load in Java, stopping';
+}
+
+# Alter LD_LIBRARY_PATH if necessary
+if ($opts{library})
+{
+    ## no critic (RequireLocalizedPunctuationVars)
+    my $libs = join q{:}, @{$opts{library}};
+    $ENV{LD_LIBRARY_PATH} = $ENV{LD_LIBRARY_PATH} ?
+        "$libs:$ENV{LD_LIBRARY_PATH}" : $libs;
+}
+
+# If no java was explicitly given, hope that it is in the path:
+$opts{java} ||= 'java';
+
+# Default the "main" class to "clojure.main"
+$opts{main} ||= 'clojure.main';
+
+my @command = build_command;
+
+if ($opts{debug})
+{
+    print "@command\n";
+    exit 0;
+}
+else
+{
+    exec @command;
+}
+
+###############################################################################
+#
+#   Sub Name:       jars_in_dir
+#
+#   Description:    Return a list of any *.jar files in the given dir. Quietly
+#                   returns an empty list if opening/reading the dir fails in
+#                   any way.
+#
+#   Arguments:      NAME      IN/OUT  TYPE      DESCRIPTION
+#                   $dir      in      scalar    Directory to read
+#
+#   Returns:        list of 0 or more JARs
+#
+###############################################################################
+sub jars_in_dir
+{
+    my $dir = shift;
+
+    opendir(my $dh, $dir) || return ();
+
+    my @jars = grep { /[.]jar/i } readdir $dh;
+    return map { "$dir/$_" } sort @jars;
+}
+
+###############################################################################
+#
+#   Sub Name:       filtered_jars
+#
+#   Description:    Filter the list of JARs in $opts{classpath} so that there
+#                   are no duplicates and so that anything in $opts{exclude} is
+#                   removed.
+#
+#   Arguments:      None.
+#
+#   Globals:        %opts
+#
+#   Returns:        List of zero or more items
+#
+###############################################################################
+sub filtered_jars
+{
+    return if (! $opts{classpath});
+
+    my %seen = map { $_ => 1 } @{$opts{exclude} || []};
+    return grep { ! $seen{$_}++ } @{$opts{classpath}};
+}
+
+###############################################################################
+#
+#   Sub Name:       merge_config
+#
+#   Description:    Merge anything read from a config file, some options
+#                   override config, some are merged in with config.
+#
+#   Arguments:      None.
+#
+#   Globals:        %opts
+#
+#   Returns:        Success:    void
+#                   Failure:    croaks
+#
+###############################################################################
+sub merge_config
+{
+    my ($fh, @lines, $linenum);
+    my $file = $opts{config} || "$ENV{HOME}/.clojurerc";
+
+    # Do nothing if there is no file
+    if (! -f $file)
+    {
+        return;
+    }
+
+    if (! open $fh, '<', $file)
+    {
+        croak "Error opening $file for reading: $!";
+    }
+    @lines = <$fh>;
+    if (! close $fh)
+    {
+        croak "Error closing $file after reading: $!";
+    }
+
+    $linenum = 0;
+    for my $line (@lines)
+    {
+        $linenum++;
+        chomp $line;
+        next if (! $line);
+        next if $line =~ /^#/;
+
+        my ($key, $value) = split /=/, $line, 2;
+        if ($line =~ /^([\w-]+)=(.*)$/)
+        {
+            $key = $1;
+            ($value = $2) =~ s/\s+$//;
+        }
+        else
+        {
+            croak "Bad line read at line $linenum of $file:\n\t$line\n";
+        }
+        # Expand '$HOME' in $value
+        $value =~ s/\$HOME/$ENV{HOME}/g;
+
+        # For some of the keys, if the value is already in %opts then the
+        # new value is ignored. For those that are list-oriented, the new
+        # value is added to the list.
+        given ($key)
+        {
+            when ('classpath')
+            {
+                push @{$opts{classpath}}, $value;
+            }
+            when ('clojure')
+            {
+                if (! $opts{clojure})
+                {
+                    $opts{clojure} = $value;
+                }
+            }
+            when ('clojure-contrib')
+            {
+                if (! $opts{'clojure-contrib'})
+                {
+                    $opts{'clojure-contrib'} = $value;
+                }
+            }
+            when ('dir')
+            {
+                push @{$opts{dir}}, $value;
+            }
+            when ('exclude')
+            {
+                push @{$opts{exclude}}, $value;
+            }
+            when ('init')
+            {
+                if (! $opts{init})
+                {
+                    $opts{init} = $value;
+                }
+            }
+            when ('java')
+            {
+                if (! $opts{java})
+                {
+                    $opts{java} = $value;
+                }
+            }
+            when ('javaopt')
+            {
+                if ($value =~ /^['"](.*?)['"]$/)
+                {
+                    $value = $1;
+                }
+                push @{$opts{javaopt}}, $value;
+            }
+            when ('library')
+            {
+                push @{$opts{library}}, $value;
+            }
+            when ('main')
+            {
+                if (! $opts{main})
+                {
+                    $opts{main} = $value;
+                }
+            }
+            when ('wrapper')
+            {
+                if (! $opts{wrapper})
+                {
+                    $opts{wrapper} = $value;
+                }
+            }
+        }
+    }
+
+    # Expand those values that might have multiples in one entry. First do the
+    # ones that use ":" as a separator:
+    for my $key (qw(classpath dir exclude library))
+    {
+        @{$opts{$key}} = map { split /:/ => $_ } @{$opts{$key}};
+    }
+    # Now do javaopt, which separates on spaces rather than colons:
+    @{$opts{javaopt}} = map { split / / => $_ } @{$opts{javaopt}};
+
+    return;
+}
+
+###############################################################################
+#
+#   Sub Name:       build_command
+#
+#   Description:    Build up the java invocation command that gets passed to
+#                   exec.
+#
+#   Arguments:      None.
+#
+#   Globals:        @ARGV (whatever wasn't eaten by options parsing)
+#                   %opts
+#
+#   Returns:        list of command elements
+#
+###############################################################################
+sub build_command
+{
+    # Build the args-list
+    my @args = (
+        $opts{java},
+        # I'm not sure that this "-Dpid=$$" being passed to the JVM is actually
+        # useful, but the bash script had it so I'm keeping it (for now).
+        "-Dpid=$$",
+        @{$opts{javaopt}},
+        '-cp',
+        $opts{classpath},
+    );
+
+    if ($opts{wrapper})
+    {
+        push @args, $opts{wrapper};
+    }
+
+    push @args, $opts{main};
+
+    if ($opts{eval})
+    {
+        push @args, -e => $opts{eval};
+    }
+
+    if ($opts{init})
+    {
+        push @args, -init => $opts{init};
+    }
+
+    if ($opts{script})
+    {
+        push @args, $opts{script};
+    }
+
+    push @args, @ARGV; # Anything left over from args-parsing
+
+    return @args;
+}
+
+__END__
+
+=head1 NAME
+
+clojure - Perl wrapper for launching Clojure applications or REPL
+
+=head1 SYNOPSIS
+
+ # Minimal invocation with no config file:
+ clojure --clojure clojure.jar
+
+ # Launch with all of ~/jars, assuming clojure.jar is one of them:
+ clojure --dir ~/jars
+
+ # Launch swank-clojure from a given directory, assuming a .clojurerc
+ # that already gives the paths to clojure.jar and clojure-contrib.jar:
+ clojure --classpath swank-clojure/src --script /dev/null \
+   --eval "(use 'swank.swank)(apply -main *command-line-args*)"
+
+=head1 DESCRIPTION
+
+The B<clojure> script is a simple launcher for programs written in Clojure,
+and for launching REPLs. It is inspired by the C<clojure> bash script from
+the Github repository, L<https://github.com/jochu/clojure-extra>.
+
+This script was written to allow more flexibility in the arguments and
+specification of JAR files and such. Along the way, it accumulated a fairly
+large number of options.
+
+=head1 USAGE
+
+Usage:
+
+ clojure [ --clojure JAR ] [ --clojure-contrib JAR ] [ --main class ]
+  [ --classpath value ] [ --dir directory ] [ --library libdir ]
+  [ --exclude JAR ] [ --eval string ] [ --init file ] [ --script file ]
+  [ { --wrapper wrapper-class | --nowrapper } ] [ --java javapath ]
+  [ --javaopt JVM-option ] [ --config config-file ] [ --help ] [ --man ]
+  [ args ]
+
+=head1 REQUIRED ARGUMENTS
+
+If a configuration file is used (see below), then there are no arguments that
+are actually required. However, for Clojure itself to run then at the very
+least the core Clojure JAR must be specified (whether by configuration file or
+command-line option).
+
+=head1 OPTIONS
+
+B<clojure> recognizes the following command-line options:
+
+=over
+
+=item B<--clojure> JAR
+
+Specify the path to the Clojure core JAR file
+
+=item B<--clojure-contrib> JAR
+
+Specify the path to the Clojure Contrib JAR file
+
+=item B<--classpath> string
+
+Provide one or more additional class-path arguments for the JVM. These may
+be JAR files or directories under which F<.class> files are found. More than
+one value may be specified by separating them with C<:> characters (just as
+Java itself does).
+
+This option may be specified more than once.
+
+=item B<--dir> string
+
+Specify one or more directories that contain JAR files. All files ending in
+F<.jar> (case-insensitive) in the given directories are added to the class-path
+collection. As with C<classpath>, multiple entries may be specified by
+separating them with C<:> characters.
+
+This option may be specified more than once.
+
+=item B<--library> string
+
+Specify one or more (separated by C<:>) directories to add to the
+environment variable B<LD_LIBRARY_PATH>. This allows for using JAR files that
+also have a shared-library component to them.
+
+This option may be specified more than once.
+
+=item B<--exclude> string
+
+Specify one or more JAR files (or class directories) that should be excluded
+from the final class-path that is constructed for passing to the JVM. This
+is useful for cases where a C<--dir> option is needed to get several JARs,
+but there's one or two in there that you don't want. This matches against
+full path-names, so the values must be full paths.
+
+This option may be specified more than once.
+
+=item B<--main> class
+
+Specify the class to invoke, to start Clojure. This defaults to
+C<clojure.main>. You probably don't want to change this, unless you are
+I<really> sure of what you're doing. I just put it here because I don't
+believe in hard-coding anything that can be made into an option.
+
+=item B<--eval> string
+
+Provide a string of Clojure code that gets eval'd before any file argument
+is loaded.
+
+=item B<--init> file
+
+Specify the name of an "initialization" file of Clojure code that gets loaded
+and evaluated before any file/script argument is read. The default for this
+file is F<.clojure.clr> in the user's home directory. If that file is present,
+it will be automatically loaded.
+
+=item B<--script> file
+
+Provide the name of a Clojure file to run, instead of running a REPL.
+
+=item B<--wrapper> wrapper-class
+
+Specify a class to invoke as a "wrapper" around the Clojure main class. This
+is most-often used with the jLine ReadLine library for Java, in concert with
+launching a REPL.
+
+=item B<--nowrapper>
+
+Suppress the specification of a wrapper class on the B<java> command-line.
+This is to allow a wrapper specified in a configuration file to be
+overridden.
+
+=item B<--java> javapath
+
+Explicitly define the path to the B<java> executable that will be used to
+run Clojure. The default is simply C<java>, which must be found within your
+executable path.
+
+=item B<--javaopt> string
+
+Provide options for the JVM itself. Options specified here are passed directly
+to the B<java> executable (or whatever you have given in place of it via
+C<--java>, above). Because the C<:> character might be valid in a JVM option,
+multiple values here are separated by spaces. This means that if you want to
+specify multiple values on the command-line, you will have to enclose the
+whole argument in quotes.
+
+This option may be specified more than once.
+
+=item B<--config> file
+
+Specify an alternate file to read as the configuration file. By default,
+B<clojure> will read F<.clojurerc> in the user's home directory if it is
+present.
+
+=item B<--help>
+
+Display a summary of the options and exit.
+
+=item B<--man>
+
+Display this manual page and exit.
+
+=back
+
+Several of the options are noted as being allowed to appear more than once. For
+these options, the repeated occurrances of them accumulate their values
+together, rather than overwriting any previous values. For example, the
+following two command line sequences are equivalent:
+
+    --classpath ant.jar --classpath ant-launcher.jar
+
+and
+
+    --classpath ant.jar:ant-launcher.jar
+
+Also note that if a C<--classpath> or C<--dir> argument provides the Clojure
+core and/or contrib JARs, you do not need the specific arguments for them. My
+F<.clojurerc> actually only contains two lines:
+
+    dir=$HOME/lib/clojure:$HOME/lib/java
+    wrapper=jline.ConsoleRunner
+
+The jars in F<$HOME/lib/clojure> include both F<clojure.jar> and
+F<clojure-contrib.jar>, while F<$HOME/lib/java> contains F<jline.jar> (which
+is needed, since the C<wrapper>-specified class comes from there).
+
+=head1 EXIT STATUS
+
+B<clojure> uses C<exec> to pass execution to Java, and thus never itself exits.
+The exit code of the B<clojure> process is whatever the exit code of the
+executed Java process is.
+
+=head1 THE .clojurerc FILE
+
+If present, a file called F<.clojurerc> in the user's home directory will be
+read for options, which are merged in to any options given on the command-line.
+The name of this file can be overridden by the C<--config> option.
+
+The contents of this file are a series of lines, each of which is one of:
+
+=over
+
+=item * A blank line
+
+All blank lines are ignored.
+
+=item * A comment
+
+Any lines starting with a C<#> character are considered comments, and are
+ignored.
+
+=item * A configuration option
+
+A line providing a configuration option name and value.
+
+=back
+
+Any lines that are not either a blank line or a comment are expected to be of
+the form:
+
+    option=value
+
+where C<option> is any of the following options (described earlier):
+
+    classpath [*]
+    clojure
+    clojure-contrib
+    dir [*]
+    exclude [*]
+    init
+    java
+    javaopt [*]
+    library [*]
+    main
+    wrapper
+
+Those options marked by C<[*]> may appear more than once in the configuration
+file, just as they may appear more than once on the command line. Options that
+specify multiple values via C<:>-separation may do so in the configuration file
+also. As well, the C<javaopt> option may specify multiple values separated by
+spaces as with the command-line, but in the configuration file no quotes are
+needed (since the shell is not tokenizing the value, as it does with
+command-line options).
+
+Any occurrance of C<$HOME> in a configuration file value is replaced with the
+full path of the user's home directory.
+
+=head2 Command-Line vs. Config File
+
+Command-line options override options specified in the configuration file,
+except for multi-options (C<classpath>, C<javaopt>, etc.) which augment the
+values in the configuration file. For example, the following line in a
+F<.clojurerc> specifies the location of the core Clojure JAR:
+
+    # Path to Clojure core:
+    clojure=/usr/local/lib/jars/clojure-1.3.0-SNAPSHOT.jar
+
+The following command-line option would override that setting:
+
+    --clojure /usr/local/lib/jars/clojure-1.2-SNAPSHOT.jar
+
+However, if the following lines were in the configuration:
+
+    classpath=/usr/local/lib/jars/clojure-1.2-SNAPSHOT.jar
+    classpath=/usr/local/lib/jars/clojure-contrib-1.2-SNAPSHOT.jar
+
+The following command-line option would add to this, resulting in a class-path
+argument to Java that has three elements:
+
+    --classpath /usr/local/lib/jars/ant.jar
+
+=head2 Example Configuration File
+
+The following is an example of a small configuration file, similar to the one
+I myself use:
+
+    # Define Clojure and Clojure Contrib locations
+    clojure=$HOME/lib/clojure/clojure.jar
+    clojure-contrib=$HOME/lib/clojure/clojure-contrib.jar
+
+    # Include everything in lib/java (which includes jLine)
+    dir=$HOME/lib/java
+
+    # Set jLine's wrapper for REPL usage:
+    wrapper=jline.ConsoleRunner
+
+=head1 ENVIRONMENT VARIABLES
+
+B<clojure> reads no environment variables. Any instances of the C<--library>
+option will cause the B<LD_LIBRARY_PATH> environment variable to be altered.
+
+=head1 AUTHOR
+
+Randy J. Ray C<< <rjray@blackperl.com> >>
+
+=head1 BUGS
+
+Please report any bugs or feature requests to the issues list at Github:
+https://github.com/rjray/clojure-tools/issues
+
+=head1 SUPPORT
+
+Support for an information about the B<clojure> tool can be found at:
+
+=over
+
+=item * Git source repository
+
+https://github.com/rjray/clojure-tools
+
+=item * The clojure-tools issues list at Github
+
+https://github.com/rjray/clojure-tools/issues
+
+=back
+
+=head1 LICENSE AND COPYRIGHT
+
+This file and the code within are copyright (c) by Randy J. Ray.
+
+Copying and distribution are permitted under the terms of the Artistic
+License 2.0 (http://www.opensource.org/licenses/artistic-license-2.0.php),
+the GNU LGPL 2.1 (http://www.opensource.org/licenses/lgpl-2.1.php) or the
+Eclipse Public License 1.0
+(http://www.opensource.org/licenses/eclipse-1.0.php).
