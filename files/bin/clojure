@@ -259,7 +259,6 @@ sub filtered_jars
 ###############################################################################
 sub merge_config
 {
-    my ($fh, @lines, $linenum);
     my $file = $opts{config} || "$ENV{HOME}/.clojurerc";
 
     # Do nothing if there is no file
@@ -268,15 +267,11 @@ sub merge_config
         return;
     }
 
-    if (! open $fh, '<', $file)
-    {
-        croak "Error opening $file for reading: $!";
-    }
-    @lines = <$fh>;
-    if (! close $fh)
-    {
-        croak "Error closing $file after reading: $!";
-    }
+    open my $fh, '<', $file
+        or croak "Error opening $file for reading: $!";
+    my @lines = <$fh>;
+    close $fh
+        or croak "Error closing $file after reading: $!";
 
     $linenum = 0;
     for my $line (@lines)
