@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 ###############################################################################
 #
@@ -40,10 +40,10 @@ use Carp 'croak';
 use File::Basename qw(basename);
 use Getopt::Long;
 
-$VERSION = '0.100';
+$VERSION = '0.101';
 $CMD = basename $0;
 $USAGE = << "EOUSAGE";
-$CMD [ --clojure JAR ] [ --clojure-contrib JAR ] [ --main class ]
+$CMD [ --clojure JAR ] [ --main class ]
     [ --classpath value ] [ --dir directory ] [ --library libdir ]
     [ --exclude JAR ] [ --eval string ] [ --init file ] [ --script file ]
     [ { --wrapper wrapper-class | --nowrapper } ] [ --java javapath ]
@@ -53,7 +53,6 @@ $CMD [ --clojure JAR ] [ --clojure-contrib JAR ] [ --main class ]
 where:
 
 --clojure JAR               Specify the path to the Clojure core JAR file.
---clojure-contrib JAR       Specify the path to the Clojure contrib JAR.
 --classpath value           One or more classpath entries, separated by ':'
                               characters, may be directories or JARs. May
                               be used more than once.
@@ -102,8 +101,7 @@ GetOptions(
     \%opts,
     qw(
         classpath|cp=s@
-        clojure|CL=s
-        clojure-contrib|CC=s
+        clojure|C=s
         config|c=s
         debug
         dir|d=s@
@@ -152,10 +150,6 @@ for my $jardir (@{$opts{dir}})
 {
     push @{$opts{classpath}}, jars_in_dir($jardir);
 }
-if ($opts{'clojure-contrib'})
-{
-    unshift @{$opts{classpath}}, $opts{'clojure-contrib'};
-}
 if ($opts{clojure})
 {
     unshift @{$opts{classpath}}, $opts{clojure};
@@ -165,14 +159,14 @@ $opts{classpath} = join q{:} => @{$opts{classpath} || []};
 # If we have no JARs/classpaths, we have no way to execute
 if (! $opts{classpath})
 {
-    croak 'No classpaths specified to load in Java, stopping';
+    croak 'No classpaths/jars specified to load in Java, stopping';
 }
 
 # Alter LD_LIBRARY_PATH if necessary
 if ($opts{library})
 {
     ## no critic (RequireLocalizedPunctuationVars)
-    my $libs = join q{:}, @{$opts{library}};
+    my $libs = join q{:} => @{$opts{library}};
     $ENV{LD_LIBRARY_PATH} = $ENV{LD_LIBRARY_PATH} ?
         "$libs:$ENV{LD_LIBRARY_PATH}" : $libs;
 }
@@ -262,10 +256,7 @@ sub merge_config
     my $file = $opts{config} || "$ENV{HOME}/.clojurerc";
 
     # Do nothing if there is no file
-    if (! -f $file)
-    {
-        return;
-    }
+    return if (! -f $file);
 
     open my $fh, '<', $file
         or croak "Error opening $file for reading: $!";
@@ -273,7 +264,8 @@ sub merge_config
     close $fh
         or croak "Error closing $file after reading: $!";
 
-    $linenum = 0;
+    my $linenum = 0;
+    my ($key, $value);
     for my $line (@lines)
     {
         $linenum++;
@@ -281,7 +273,6 @@ sub merge_config
         next if (! $line);
         next if $line =~ /^#/;
 
-        my ($key, $value) = split /=/, $line, 2;
         if ($line =~ /^([\w-]+)=(.*)$/)
         {
             $key = $1;
@@ -308,13 +299,6 @@ sub merge_config
                 if (! $opts{clojure})
                 {
                     $opts{clojure} = $value;
-                }
-            }
-            when ('clojure-contrib')
-            {
-                if (! $opts{'clojure-contrib'})
-                {
-                    $opts{'clojure-contrib'} = $value;
                 }
             }
             when ('dir')
@@ -450,7 +434,7 @@ clojure - Perl wrapper for launching Clojure applications or REPL
  clojure --dir ~/jars
 
  # Launch swank-clojure from a given directory, assuming a .clojurerc
- # that already gives the paths to clojure.jar and clojure-contrib.jar:
+ # that already gives the paths to clojure.jar:
  clojure --classpath swank-clojure/src --script /dev/null \
    --eval "(use 'swank.swank)(apply -main *command-line-args*)"
 
@@ -468,7 +452,7 @@ large number of options.
 
 Usage:
 
- clojure [ --clojure JAR ] [ --clojure-contrib JAR ] [ --main class ]
+ clojure [ --clojure JAR ] [ --main class ]
   [ --classpath value ] [ --dir directory ] [ --library libdir ]
   [ --exclude JAR ] [ --eval string ] [ --init file ] [ --script file ]
   [ { --wrapper wrapper-class | --nowrapper } ] [ --java javapath ]
@@ -491,10 +475,6 @@ B<clojure> recognizes the following command-line options:
 =item B<--clojure> JAR
 
 Specify the path to the Clojure core JAR file
-
-=item B<--clojure-contrib> JAR
-
-Specify the path to the Clojure Contrib JAR file
 
 =item B<--classpath> string
 
@@ -612,15 +592,15 @@ and
     --classpath ant.jar:ant-launcher.jar
 
 Also note that if a C<--classpath> or C<--dir> argument provides the Clojure
-core and/or contrib JARs, you do not need the specific arguments for them. My
-F<.clojurerc> actually only contains two lines:
+core JAR, you do not need the specific argument for it. My F<.clojurerc>
+actually only contains two lines:
 
     dir=$HOME/lib/clojure:$HOME/lib/java
     wrapper=jline.ConsoleRunner
 
-The jars in F<$HOME/lib/clojure> include both F<clojure.jar> and
-F<clojure-contrib.jar>, while F<$HOME/lib/java> contains F<jline.jar> (which
-is needed, since the C<wrapper>-specified class comes from there).
+The jars in F<$HOME/lib/clojure> include F<clojure.jar>, while
+F<$HOME/lib/java> contains F<jline.jar> (which is needed, since the
+C<wrapper>-specified class comes from there).
 
 =head1 EXIT STATUS
 
@@ -662,7 +642,6 @@ where C<option> is any of the following options (described earlier):
 
     classpath [*]
     clojure
-    clojure-contrib
     dir [*]
     exclude [*]
     init
@@ -712,9 +691,8 @@ argument to Java that has three elements:
 The following is an example of a small configuration file, similar to the one
 I myself use:
 
-    # Define Clojure and Clojure Contrib locations
+    # Define Clojure location
     clojure=$HOME/lib/clojure/clojure.jar
-    clojure-contrib=$HOME/lib/clojure/clojure-contrib.jar
 
     # Include everything in lib/java (which includes jLine)
     dir=$HOME/lib/java
